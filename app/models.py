@@ -1,6 +1,7 @@
 from pydantic import BaseModel, EmailStr, Field
 from typing import Optional
 from bson import ObjectId
+import datetime
 
 # Pydantic Model for User Registration
 class UserCreate(BaseModel):
@@ -23,3 +24,17 @@ class Account(BaseModel):
     user_id: str  # Linked to User
     account_number: str
     balance: float = 0.0
+
+# Deposit & Withdraw Request Schema
+class TransactionRequest(BaseModel):
+    amount: float = Field(gt=0)  # Amount should be greater than 0
+    idempotency_key: str  # Unique key for each transaction
+
+# Transaction Log Schema
+class TransactionLog(BaseModel):
+    user_id: str
+    account_number: str
+    amount: float
+    type: str  # "deposit" or "withdraw"
+    timestamp: datetime.datetime = datetime.datetime.utcnow()
+    idempotency_key: str  # Used to prevent duplicates
