@@ -2,6 +2,7 @@ from pydantic import BaseModel, EmailStr, Field
 from typing import Optional
 from bson import ObjectId
 import datetime
+from datetime import datetime  
 
 # Pydantic Model for User Registration
 class UserCreate(BaseModel):
@@ -23,7 +24,9 @@ class UserDB(UserResponse):
 class Account(BaseModel):
     user_id: str  # Linked to User
     account_number: str
-    balance: float = 0.0
+    balance: float = Field(default=0.0, ge=0)
+    locked: bool = Field(default=False)  # For pessimistic locking during transactions
+    txn_version: Optional[int] = Field(default=1)  # For optimistic locking if needed
 
 # Deposit & Withdraw Request Schema
 class TransactionRequest(BaseModel):
@@ -36,5 +39,5 @@ class TransactionLog(BaseModel):
     account_number: str
     amount: float
     type: str  # "deposit" or "withdraw"
-    timestamp: datetime.datetime = datetime.datetime.utcnow()
+    timestamp: datetime = datetime.utcnow()
     idempotency_key: str  # Used to prevent duplicates

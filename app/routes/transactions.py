@@ -24,11 +24,13 @@ async def deposit(transaction: TransactionRequest, current_user: dict = Depends(
 
     if result.modified_count == 0:
         raise HTTPException(status_code=400, detail="Account not found")
-
+    # Retrieve the updated account to get the new balance.
+    account = await db.accounts.find_one({"user_id": user_id})
+    new_balance = account.get("balance", 0)
     # Step 3: Log the transaction
     txn_log = {
         "user_id": user_id,
-        "account_number": current_user["account_number"],
+        "account_number": account.get("account_number", "unknown"),  # Updated here!
         "amount": transaction.amount,
         "type": "deposit",
         "timestamp": datetime.datetime.utcnow(),
@@ -36,9 +38,9 @@ async def deposit(transaction: TransactionRequest, current_user: dict = Depends(
     }
     await db.transactions.insert_one(txn_log)
 
-    return {"message": "Deposit successful", "new_balance": transaction.amount}
+    return {"message": "Deposit successful", "new_balance": new_balance}
 
-# Withdraw Money API with Locking
+# Withdraw Money API with Locking Uses pessimistic locking to prevent race conditions.
 @router.post("/withdraw")
 async def withdraw(transaction: TransactionRequest, current_user: dict = Depends(get_current_user)):
     user_id = current_user["user_id"]
@@ -57,24 +59,31 @@ async def withdraw(transaction: TransactionRequest, current_user: dict = Depends
     if lock_result.modified_count == 0:
         raise HTTPException(status_code=400, detail="Insufficient balance or account locked")
 
-    # Step 3: Deduct money atomically
-    await db.accounts.update_one(
-        {"user_id": user_id},
-        {"$inc": {"balance": -transaction.amount}}
-    )
+    try:
+        # Deduct the amount atomically using $inc.
+        withdraw_result = await db.accounts.update_one(
+            {"user_id": user_id},
+            {"$inc": {"balance": -transaction.amount}}
+        )
+        if withdraw_result.modified_count == 0:
+            raise HTTPException(status_code=400, detail="Withdrawal failed")
 
-    # Step 4: Unlock the account
-    await db.accounts.update_one({"user_id": user_id}, {"$set": {"locked": False}})
+        # Retrieve updated account balance.
+        account = await db.accounts.find_one({"user_id": user_id})
+        new_balance = account.get("balance", 0)
 
-    # Step 5: Log the transaction
-    txn_log = {
-        "user_id": user_id,
-        "account_number": current_user["account_number"],
-        "amount": transaction.amount,
-        "type": "withdraw",
-        "timestamp": datetime.datetime.utcnow(),
-        "idempotency_key": transaction.idempotency_key
-    }
-    await db.transactions.insert_one(txn_log)
+        # Log the withdrawal transaction.
+        txn_log = {
+            "user_id": user_id,
+            "account_number": account.get("account_number", "unknown"),
+            "amount": transaction.amount,
+            "type": "withdraw",
+            "timestamp": datetime.datetime.utcnow(),
+            "idempotency_key": transaction.idempotency_key
+        }
+        await db.transactions.insert_one(txn_log)
+    finally:
+        # Ensure that the account is unlocked even if an error occurs.
+        await db.accounts.update_one({"user_id": user_id}, {"$set": {"locked": False}})
 
-    return {"message": "Withdrawal successful"}
+    return {"message": "Withdrawal successful", "new_balance": new_balance}
