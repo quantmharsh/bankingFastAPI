@@ -10,7 +10,7 @@ limiter = Limiter(key_func=get_remote_address)
 
 @app.middleware("http")
 async def limit_requests(request, call_next):
-    response = await limiter.limit("10/minute")(call_next)(request)
+    response = await limiter.limit("100/minute")(call_next)(request)
     return response
 
 

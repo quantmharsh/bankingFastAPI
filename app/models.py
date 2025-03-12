@@ -9,12 +9,15 @@ class UserCreate(BaseModel):
     name: str = Field(..., min_length=3)
     email: EmailStr
     password: str = Field(..., min_length=6)
+     # Default role is "customer", can be changed to "admin", "manager", etc.
+    role: str = Field(default="customer")
 
 # Pydantic Model for User Response (excluding password)
 class UserResponse(BaseModel):
     id: str
     name: str
     email: str
+    role: str  # Include role in user response
 
 # MongoDB Schema for Users
 class UserDB(UserResponse):

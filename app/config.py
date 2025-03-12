@@ -6,18 +6,22 @@ from motor.motor_asyncio import AsyncIOMotorClient
 # Load environment variables from .env file
 load_dotenv()
 
+# Get values from .env without defaults
+JWT_SECRET = os.getenv("JWT_SECRET")
+JWT_ALGORITHM = os.getenv("JWT_ALGORITHM")
+MONGO_URI = os.getenv("MONGO_URI")
 
-# Get values from .env
-JWT_SECRET = os.getenv("JWT_SECRET", "your_super_secret_key")
-JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
-
-# Debugging: Print values to verify
+# Debugging: Print values to verify (optional; remove in production)
 print(f"JWT_SECRET: {JWT_SECRET}")
 print(f"JWT_ALGORITHM: {JWT_ALGORITHM}")
+print(f"MONGO_URI: {MONGO_URI}")
 
-# Ensure values are not None
+
+# Ensure required environment variables are set
 if not JWT_SECRET or not JWT_ALGORITHM:
     raise ValueError("Missing JWT_SECRET or JWT_ALGORITHM in .env file")
+if not MONGO_URI:
+    raise ValueError("Missing MONGO_URI in .env file")
 
 # MongoDB Connection
 MONGO_URI = os.getenv("MONGO_URI")

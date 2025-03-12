@@ -4,6 +4,7 @@ from fastapi.security import OAuth2PasswordBearer
 from jose import jwt, JWTError
 import os
 from app.config import JWT_SECRET, JWT_ALGORITHM  # Import directly
+from typing import List
 
 # Password Hashing
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -34,3 +35,25 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
         return payload  # Contains user_id and email
     except JWTError:
         raise HTTPException(status_code=401, detail="Invalid token")
+    
+
+
+def require_roles(allowed_roles: List[str]):
+    """
+    Dependency generator that ensures the current user has an allowed role.
+    Usage:
+      current_user = Depends(require_roles(["admin", "manager"]))
+    """
+    def role_checker(token: str = Depends(oauth2_scheme)):
+        try:
+            payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+            user_role = payload.get("role", "customer")
+            if user_role not in allowed_roles:
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"User role '{user_role}' not allowed to perform this action."
+                )
+            return payload  # Return the payload so we have user_id, email, role
+        except JWTError:
+            raise HTTPException(status_code=401, detail="Invalid token")
+    return role_checker

@@ -3,6 +3,8 @@ from app.config import db
 from app.models import TransactionRequest, TransactionLog
 from app.utils import get_current_user
 import datetime
+from app.utils import require_roles
+from bson import ObjectId
 
 router = APIRouter()
 
@@ -87,3 +89,26 @@ async def withdraw(transaction: TransactionRequest, current_user: dict = Depends
         await db.accounts.update_one({"user_id": user_id}, {"$set": {"locked": False}})
 
     return {"message": "Withdrawal successful", "new_balance": new_balance}
+
+
+def convert_objectids(item):
+    """
+    Recursively convert ObjectId fields in a dictionary to strings.
+    """
+    if isinstance(item, dict):
+        for key, value in item.items():
+            if isinstance(value, ObjectId):
+                item[key] = str(value)
+            elif isinstance(value, list):
+                item[key] = [convert_objectids(i) for i in value]
+            elif isinstance(value, dict):
+                item[key] = convert_objectids(value)
+    return item
+
+@router.get("/all-transactions")
+async def all_transactions(current_user: dict = Depends(require_roles(["admin"]))):
+    # Only admin can see all transaction logs
+    transactions = await db.transactions.find().to_list(None)
+    # Convert ObjectId fields to strings for JSON serialization
+    transactions = [convert_objectids(txn) for txn in transactions]
+    return {"transactions": transactions}
