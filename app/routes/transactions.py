@@ -2,10 +2,14 @@ from fastapi import APIRouter, Depends, HTTPException
 from app.config import db
 from app.models import TransactionRequest, TransactionLog
 from app.utils import get_current_user
-import datetime
+
+from datetime import datetime, timedelta
+
 from app.utils import require_roles
 from bson import ObjectId
 from app.models import TransferRequest
+from fastapi import Query
+from typing import Optional, Dict, List
 
 router = APIRouter()
 
@@ -26,7 +30,18 @@ async def deposit(transaction: TransactionRequest, current_user: dict = Depends(
     )
 
     if result.modified_count == 0:
-        raise HTTPException(status_code=400, detail="Account not found")
+         # Log a "failed" deposit transaction if the update didn't affect any documents
+        fail_txn_log = {
+            "user_id": user_id,
+            "account_number": "unknown",  # We don’t have a valid account number
+            "amount": transaction.amount,
+            "type": "deposit",
+            "timestamp": datetime.datetime.utcnow(),
+            "idempotency_key": transaction.idempotency_key,
+            "status": "failed"
+        }
+        await db.transactions.insert_one(fail_txn_log)
+        raise HTTPException(status_code=400, detail="Account not found or invalid ")
     # Retrieve the updated account to get the new balance.
     account = await db.accounts.find_one({"user_id": user_id})
     new_balance = account.get("balance", 0)
@@ -37,7 +52,8 @@ async def deposit(transaction: TransactionRequest, current_user: dict = Depends(
         "amount": transaction.amount,
         "type": "deposit",
         "timestamp": datetime.datetime.utcnow(),
-        "idempotency_key": transaction.idempotency_key
+        "idempotency_key": transaction.idempotency_key ,
+        "status": "success"  # Mark as successful
     }
     await db.transactions.insert_one(txn_log)
 
@@ -60,6 +76,16 @@ async def withdraw(transaction: TransactionRequest, current_user: dict = Depends
     )
 
     if lock_result.modified_count == 0:
+        fail_txn_log = {
+            "user_id": user_id,
+            "account_number": "unknown",
+            "amount": transaction.amount,
+            "type": "withdraw",
+            "timestamp": datetime.datetime.utcnow(),
+            "idempotency_key": transaction.idempotency_key,
+            "status": "failed"
+        }
+        await db.transactions.insert_one(fail_txn_log)
         raise HTTPException(status_code=400, detail="Insufficient balance or account locked")
 
     try:
@@ -82,7 +108,8 @@ async def withdraw(transaction: TransactionRequest, current_user: dict = Depends
             "amount": transaction.amount,
             "type": "withdraw",
             "timestamp": datetime.datetime.utcnow(),
-            "idempotency_key": transaction.idempotency_key
+            "idempotency_key": transaction.idempotency_key,
+            "status": "success"  # Mark as successful
         }
         await db.transactions.insert_one(txn_log)
     finally:
@@ -168,6 +195,17 @@ async def transfer_funds(
                 {"user_id": sender_id},
                 {"$inc": {"balance": transfer.amount}}
             )
+              # Log a failed transaction
+            fail_txn_log = {
+            "user_id": sender_id,
+            "account_number": sender_account.get("account_number", "unknown"),
+            "amount": transfer.amount,
+            "type": "transfer",
+            "timestamp": datetime.datetime.utcnow(),
+            "idempotency_key": transfer.idempotency_key,
+            "status": "failed"
+    }
+            await db.transactions.insert_one(fail_txn_log)
             raise HTTPException(status_code=400, detail="Failed to credit recipient account")
 
         # Step 7: Log the transfer transaction with extra details.
@@ -194,3 +232,39 @@ async def check_balance(current_user: dict = Depends(get_current_user)):
     if not account:
         raise HTTPException(status_code=404, detail="No account found")
     return {"account_number": account["account_number"], "balance": account["balance"]}
+
+@router.get("/")
+async def filter_transactions(
+    current_user: dict = Depends(get_current_user),
+    txn_type: Optional[str] = Query(None, description="Filter by transaction type: deposit, withdraw, transfer"),
+    status: Optional[str] = Query(None, description="Filter by transaction status: success, failed, blocked, pending"),
+    start_date: Optional[str] = Query(None, description="Start date in YYYY-MM-DD"),
+    end_date: Optional[str] = Query(None, description="End date in YYYY-MM-DD")
+):
+    # Only retrieve transactions for the logged-in user
+    query = {"user_id": current_user["user_id"]}
+    
+    if txn_type:
+        query["type"] = txn_type
+    if status:
+        query["status"] = status
+    try:
+        if start_date and end_date:
+            start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+            end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+            # Extend end_dt to cover the entire day (23:59:59)
+            end_dt = end_dt.replace(hour=23, minute=59, second=59)
+            query["timestamp"] = {"$gte": start_dt, "$lte": end_dt}
+        elif start_date:
+            start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+            query["timestamp"] = {"$gte": start_dt}
+        elif end_date:
+            end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+            end_dt = end_dt.replace(hour=23, minute=59, second=59)
+            query["timestamp"] = {"$lte": end_dt}
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD.")
+    
+    transactions: List[Dict] = await db.transactions.find(query).to_list(length=None)
+    transactions = [convert_objectids(txn) for txn in transactions]
+    return {"transactions": transactions}

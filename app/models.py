@@ -3,6 +3,7 @@ from typing import Optional
 from bson import ObjectId
 import datetime
 from datetime import datetime  
+from typing import Optional, Literal
 
 # Pydantic Model for User Registration
 class UserCreate(BaseModel):
@@ -41,9 +42,14 @@ class TransactionLog(BaseModel):
     user_id: str
     account_number: str
     amount: float
-    type: str  # "deposit" or "withdraw"
+    # "type" can be "deposit", "withdraw", or "transfer"
+    type: Literal["deposit", "withdraw", "transfer"]
     timestamp: datetime = datetime.utcnow()
-    idempotency_key: str  # Used to prevent duplicates
+    idempotency_key: str
+    # Status can be "success", "pending", "failed", "blocked", etc.
+    status: Literal["success", "failed", "blocked", "pending"] = "success"
+    # If you want to store the recipient in case of transfers
+    to_account: Optional[str] = None
 
 
 # Transfer Request Schema for Fund Transfer
