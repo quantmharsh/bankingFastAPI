@@ -44,3 +44,10 @@ class TransactionLog(BaseModel):
     type: str  # "deposit" or "withdraw"
     timestamp: datetime = datetime.utcnow()
     idempotency_key: str  # Used to prevent duplicates
+
+
+# Transfer Request Schema for Fund Transfer
+class TransferRequest(BaseModel):
+    to_account: str  # Recipient's account number
+    amount: float = Field(..., gt=0)  # Amount to transfer (must be greater than 0)
+    idempotency_key: str  # Unique key to prevent duplicate transfers

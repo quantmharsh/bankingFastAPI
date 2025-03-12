@@ -1,6 +1,8 @@
 from fastapi import APIRouter, HTTPException, Depends
 from app.config import db
 from app.utils import get_current_user
+from typing import List, Dict
+from bson import ObjectId  
 import random
 
 router = APIRouter()
@@ -8,6 +10,21 @@ router = APIRouter()
 # Helper function to generate a random 10-digit account number.
 def generate_account_number():
     return str(random.randint(1000000000, 9999999999))
+
+def convert_objectids(item: Dict) -> Dict:
+    """
+    Recursively convert ObjectId fields in a dictionary to strings.
+    """
+    if isinstance(item, dict):
+        for key, value in item.items():
+            if isinstance(value, ObjectId):
+                item[key] = str(value)
+            elif isinstance(value, list):
+                item[key] = [convert_objectids(i) if isinstance(i, dict) else i for i in value]
+            elif isinstance(value, dict):
+                item[key] = convert_objectids(value)
+    return item
+
 
 # API to create a bank account for the user.
 @router.post("/create-account")
@@ -40,4 +57,25 @@ async def get_account(current_user: dict = Depends(get_current_user)):
     return {
         "account_number": account["account_number"],
         "balance": account["balance"]
+    }
+@router.get("/details")
+async def account_details(current_user: dict = Depends(get_current_user)):
+    user_id = current_user["user_id"]
+
+    # Retrieve the user's account information
+    account = await db.accounts.find_one({"user_id": user_id})
+    if not account:
+        raise HTTPException(status_code=404, detail="No account found")
+    
+    # Retrieve all transactions for the user
+    transactions: List[Dict] = await db.transactions.find({"user_id": user_id}).to_list(length=None)
+    
+    # Convert ObjectIds in account and transactions
+    account = convert_objectids(account)
+    transactions = [convert_objectids(txn) for txn in transactions]
+    
+    return {
+        "account_number": account.get("account_number"),
+        "balance": account.get("balance"),
+        "transactions": transactions
     }
