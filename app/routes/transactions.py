@@ -10,6 +10,7 @@ from bson import ObjectId
 from app.models import TransferRequest
 from fastapi import Query ,Path
 from typing import Optional, Dict, List
+from app.tasks import send_email_notification  # Import the Celery task
 
 router = APIRouter()
 
@@ -352,6 +353,13 @@ async def transfer_funds(
         }
         await db.transactions.insert_one(txn_log)
         await log_audit_action(request, sender_id, "transfer_success", {"amount": transfer.amount, "to_account": transfer.to_account})
+        # **Trigger the email notification task** asynchronously.
+        # For example, send an email to the sender notifying the transfer.
+        send_email_notification.delay(
+            current_user["email"],
+            "Transfer Confirmation",
+            f"You have successfully transferred Rs.{transfer.amount} to account {transfer.to_account}."
+        )
     finally:
         # Step 8: Unlock the sender's account regardless of success or error.
         await db.accounts.update_one({"user_id": sender_id}, {"$set": {"locked": False}})

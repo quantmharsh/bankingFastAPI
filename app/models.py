@@ -23,6 +23,9 @@ class UserResponse(BaseModel):
 # MongoDB Schema for Users
 class UserDB(UserResponse):
     hashed_password: str
+    failed_attempts: int = 0
+    last_failed_attempt: Optional[datetime] = None
+    lock_until: Optional[datetime] = None
 
 # Pydantic Model for Account
 class Account(BaseModel):
