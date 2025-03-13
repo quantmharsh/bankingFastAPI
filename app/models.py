@@ -1,5 +1,5 @@
 from pydantic import BaseModel, EmailStr, Field
-from typing import Optional
+from typing import Optional, Dict
 from bson import ObjectId
 import datetime
 from datetime import datetime  
@@ -57,3 +57,10 @@ class TransferRequest(BaseModel):
     to_account: str  # Recipient's account number
     amount: float = Field(..., gt=0)  # Amount to transfer (must be greater than 0)
     idempotency_key: str  # Unique key to prevent duplicate transfers
+
+class AuditLog(BaseModel):
+    user_id: str
+    action: str  # e.g., "login", "deposit", "withdraw", "transfer", "approve_transaction"
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    ip_address: Optional[str] = None
+    details: Optional[Dict] = None  # Additional info about the action

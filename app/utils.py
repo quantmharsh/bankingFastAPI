@@ -4,7 +4,11 @@ from fastapi.security import OAuth2PasswordBearer
 from jose import jwt, JWTError
 import os
 from app.config import JWT_SECRET, JWT_ALGORITHM  # Import directly
+from datetime import datetime
+from app.config import db  # Make sure db is your Motor client
+from typing import Optional, Dict
 from typing import List
+from fastapi import Request
 
 # Password Hashing
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -57,3 +61,14 @@ def require_roles(allowed_roles: List[str]):
         except JWTError:
             raise HTTPException(status_code=401, detail="Invalid token")
     return role_checker
+
+async def log_audit_action(request: Request, user_id: str, action: str, details: Optional[Dict] = None):
+    ip_address = request.client.host  # Get client IP address
+    audit_entry = {
+        "user_id": user_id,
+        "action": action,
+        "timestamp": datetime.utcnow(),
+        "ip_address": ip_address,
+        "details": details or {}
+    }
+    await db.audit_logs.insert_one(audit_entry)

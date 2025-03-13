@@ -1,7 +1,7 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException ,Request
 from app.config import db
 from app.models import TransactionRequest, TransactionLog
-from app.utils import get_current_user
+from app.utils import get_current_user  ,log_audit_action
 
 from datetime import datetime, timedelta
 
@@ -75,7 +75,7 @@ async def check_fraud(user_id: str, txn_type: str, amount: float, recipient_acco
 
 # Deposit Money API
 @router.post("/deposit")
-async def deposit(transaction: TransactionRequest, current_user: dict = Depends(get_current_user)):
+async def deposit(transaction: TransactionRequest, request: Request, current_user: dict = Depends(get_current_user) ):
     user_id = current_user["user_id"]
 
     # Step 1: Check if transaction is already processed (Idempotency Key)
@@ -116,12 +116,14 @@ async def deposit(transaction: TransactionRequest, current_user: dict = Depends(
         "status": "success"  # Mark as successful
     }
     await db.transactions.insert_one(txn_log)
+      # After logging the successful deposit transaction:
+    await log_audit_action(request, user_id, "deposit", {"amount": transaction.amount, "idempotency_key": transaction.idempotency_key})
 
     return {"message": "Deposit successful", "new_balance": new_balance}
 
 # Withdraw Money API with Locking Uses pessimistic locking to prevent race conditions.
 @router.post("/withdraw")
-async def withdraw(transaction: TransactionRequest, current_user: dict = Depends(get_current_user)):
+async def withdraw(transaction: TransactionRequest,  request: Request,current_user: dict = Depends(get_current_user)):
     user_id = current_user["user_id"]
 
     # Step 1: Check for duplicate transactions (Idempotency Key)
@@ -142,6 +144,8 @@ async def withdraw(transaction: TransactionRequest, current_user: dict = Depends
             "status": fraud_result["status"]
         }
         await db.transactions.insert_one(txn_log)
+         # Log the fraud event in audit logs as well
+        await log_audit_action(request, user_id, "withdraw_blocked", {"amount": transaction.amount, "reason": fraud_result["reason"]})
         raise HTTPException(status_code=400, detail=fraud_result["reason"])
     if fraud_result.get("pending"):
         # Log the blocked withdrawal
@@ -155,6 +159,7 @@ async def withdraw(transaction: TransactionRequest, current_user: dict = Depends
             "status": fraud_result["status"]
         }
         await db.transactions.insert_one(txn_log)
+        await log_audit_action(request, user_id, "withdraw_pending", {"amount": transaction.amount})
         return {"message": "Withdrawal pending admin approval"}
     # Step 2: Lock the account before withdrawing (Pessimistic Locking)
     lock_result = await db.accounts.update_one(
@@ -173,6 +178,7 @@ async def withdraw(transaction: TransactionRequest, current_user: dict = Depends
             "status": "failed"
         }
         await db.transactions.insert_one(fail_txn_log)
+        await log_audit_action(request, user_id, "withdraw_pending", {"amount": transaction.amount})
         raise HTTPException(status_code=400, detail="Insufficient balance or account locked")
 
     try:
@@ -199,6 +205,8 @@ async def withdraw(transaction: TransactionRequest, current_user: dict = Depends
             "status": "success"  # Mark as successful
         }
         await db.transactions.insert_one(txn_log)
+        await log_audit_action(request, user_id, "withdraw_success", {"amount": transaction.amount})
+  
     finally:
         # Ensure that the account is unlocked even if an error occurs.
         await db.accounts.update_one({"user_id": user_id}, {"$set": {"locked": False}})
@@ -231,6 +239,7 @@ async def all_transactions(current_user: dict = Depends(require_roles(["admin"])
 @router.post("/transfer")
 async def transfer_funds(
     transfer: TransferRequest,
+    request:Request,
     current_user: dict = Depends(get_current_user)
 ):
     sender_id = current_user["user_id"]
@@ -255,6 +264,7 @@ async def transfer_funds(
             "to_account": transfer.to_account
         }
         await db.transactions.insert_one(txn_log)
+        await log_audit_action(request, sender_id, "transfer_blocked", {"amount": transfer.amount, "to_account": transfer.to_account})
         raise HTTPException(status_code=400, detail=fraud_result["reason"])
     if fraud_result.get("pending"):
         # Log pending transfer and return.
@@ -269,6 +279,7 @@ async def transfer_funds(
             "to_account": transfer.to_account
         }
         await db.transactions.insert_one(txn_log)
+        await log_audit_action(request, sender_id, "transfer_pending", {"amount": transfer.amount, "to_account": transfer.to_account})
         return {"message": "Transfer pending admin approval"}
     
     # Step 2: Retrieve the sender's account.
@@ -321,9 +332,11 @@ async def transfer_funds(
             "type": "transfer",
             "timestamp": datetime.utcnow(),
             "idempotency_key": transfer.idempotency_key,
-            "status": "failed"
+            "status": "failed",
+             "to_account": transfer.to_account
     }
             await db.transactions.insert_one(fail_txn_log)
+            await log_audit_action(request, sender_id, "transfer_failed", {"amount": transfer.amount, "to_account": transfer.to_account})
             raise HTTPException(status_code=400, detail="Failed to credit recipient account")
 
         # Step 7: Log the transfer transaction with extra details.
@@ -338,6 +351,7 @@ async def transfer_funds(
             "status":"success"  # Additional field for transfers
         }
         await db.transactions.insert_one(txn_log)
+        await log_audit_action(request, sender_id, "transfer_success", {"amount": transfer.amount, "to_account": transfer.to_account})
     finally:
         # Step 8: Unlock the sender's account regardless of success or error.
         await db.accounts.update_one({"user_id": sender_id}, {"$set": {"locked": False}})
@@ -398,10 +412,12 @@ async def list_pending_transactions():
     return {"pending_transactions": pending_txns}
 
 
-@router.post("/pending/{txn_id}")
+@router.post("/pending/{txn_id}" )
 async def process_pending_transaction(
     txn_id: str,
+    request:Request, 
     action: str = Query(..., description="Action to perform: approve or reject"),
+    
     current_user: dict = Depends(require_roles(["admin"]))
 ):
     # Find the pending transaction by its ObjectId
@@ -414,6 +430,7 @@ async def process_pending_transaction(
 
     if action == "reject":
         await db.transactions.update_one({"_id": ObjectId(txn_id)}, {"$set": {"status": "failed"}})
+        await log_audit_action(request, pending_txn["user_id"], "pending_rejected", {"txn_id": txn_id})
         return {"message": "Transaction rejected"}
 
     # If approving, then perform the funds movement based on transaction type
@@ -432,6 +449,7 @@ async def process_pending_transaction(
             raise HTTPException(status_code=400, detail="Failed to debit funds on approval")
         # Mark as approved (success)
         await db.transactions.update_one({"_id": ObjectId(txn_id)}, {"$set": {"status": "success"}})
+        await log_audit_action(request, user_id, "pending_withdraw_approved", {"txn_id": txn_id})
         return {"message": "Withdrawal approved and funds deducted"}
     
     elif txn_type == "transfer":
@@ -456,6 +474,7 @@ async def process_pending_transaction(
             raise HTTPException(status_code=400, detail="Failed to credit recipient on approval")
         # Mark as approved (success)
         await db.transactions.update_one({"_id": ObjectId(txn_id)}, {"$set": {"status": "success"}})
+        await log_audit_action(request, sender_id, "pending_transfer_approved", {"txn_id": txn_id})
         return {"message": "Transfer approved; funds debited and credited"}
     else:
         raise HTTPException(status_code=400, detail="Unsupported transaction type for approval")
