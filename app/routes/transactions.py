@@ -8,10 +8,70 @@ from datetime import datetime, timedelta
 from app.utils import require_roles
 from bson import ObjectId
 from app.models import TransferRequest
-from fastapi import Query
+from fastapi import Query ,Path
 from typing import Optional, Dict, List
 
 router = APIRouter()
+
+
+# ------------------------------
+# Fraud Detection Helper Function
+# ------------------------------
+async def check_fraud(user_id: str, txn_type: str, amount: float, recipient_account: Optional[str] = None) -> Dict:
+    """
+    Check fraud rules for withdrawals and transfers.
+    
+    Rules:
+      - Daily limit: total withdrawals/transfers (status "success") in a day must not exceed 50,000 Rs.
+      - Hourly frequency: maximum 20 withdrawals/transfers in the past hour.
+      - For transfers: maximum 5 transfers to the same recipient per day.
+      - Single transaction threshold: if amount > 25,000 Rs, block the transaction.
+    Returns a dict with keys:
+      "block": bool, "reason": str, "status": "blocked" if blocked.
+    """
+    now = datetime.utcnow()
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    today_end = now.replace(hour=23, minute=59, second=59, microsecond=999999)
+    one_hour_ago = now - timedelta(hours=1)
+
+    # 1. Daily total (only count successful withdrawals/transfers)
+    daily_txns = await db.transactions.find({
+        "user_id": user_id,
+        "type": {"$in": ["withdraw", "transfer"]},
+        "timestamp": {"$gte": today_start, "$lte": today_end},
+        "status": "success"
+    }).to_list(length=None)
+    daily_total = sum(txn["amount"] for txn in daily_txns)
+    if daily_total + amount > 50000:
+        return {"block": True, "reason": "Daily limit exceeded", "status": "blocked"}
+
+    # 2. Hourly frequency check (count successful transactions in the last hour)
+    hourly_txns = await db.transactions.find({
+        "user_id": user_id,
+        "type": {"$in": ["withdraw", "transfer"]},
+        "timestamp": {"$gte": one_hour_ago},
+        "status": "success"
+    }).to_list(length=None)
+    if len(hourly_txns) >= 20:
+        return {"block": True, "reason": "Hourly transaction frequency exceeded", "status": "blocked"}
+
+    # 3. For transfers: check if more than 5 transfers to the same recipient today
+    if txn_type == "transfer" and recipient_account:
+        transfers_to_recipient = await db.transactions.find({
+            "user_id": user_id,
+            "type": "transfer",
+            "to_account": recipient_account,
+            "timestamp": {"$gte": today_start, "$lte": today_end},
+            "status": "success"
+        }).to_list(length=None)
+        if len(transfers_to_recipient) >= 5:
+            return {"block": True, "reason": "Too many transfers to this recipient today", "status": "blocked"}
+
+    # 4. For large single transactions: if amount > 25,000 Rs then block
+    if amount > 25000:
+        return {"pending": True, "reason": "Transaction amount exceeds 25,000 Rs , pending admin approval", "status": "pending"}
+
+    return {"block": False}
 
 # Deposit Money API
 @router.post("/deposit")
@@ -36,7 +96,7 @@ async def deposit(transaction: TransactionRequest, current_user: dict = Depends(
             "account_number": "unknown",  # We don’t have a valid account number
             "amount": transaction.amount,
             "type": "deposit",
-            "timestamp": datetime.datetime.utcnow(),
+            "timestamp": datetime.utcnow(),
             "idempotency_key": transaction.idempotency_key,
             "status": "failed"
         }
@@ -51,7 +111,7 @@ async def deposit(transaction: TransactionRequest, current_user: dict = Depends(
         "account_number": account.get("account_number", "unknown"),  # Updated here!
         "amount": transaction.amount,
         "type": "deposit",
-        "timestamp": datetime.datetime.utcnow(),
+        "timestamp": datetime.utcnow(),
         "idempotency_key": transaction.idempotency_key ,
         "status": "success"  # Mark as successful
     }
@@ -68,7 +128,34 @@ async def withdraw(transaction: TransactionRequest, current_user: dict = Depends
     existing_txn = await db.transactions.find_one({"idempotency_key": transaction.idempotency_key})
     if existing_txn:
         return {"message": "Duplicate transaction ignored", "transaction_id": str(existing_txn["_id"])}
-
+     # Fraud check for withdrawal (no recipient for withdrawals)
+    fraud_result = await check_fraud(user_id, "withdraw", transaction.amount)
+    if fraud_result.get("block"):
+        # Log the blocked withdrawal
+        txn_log = {
+            "user_id": user_id,
+            "account_number": "unknown",
+            "amount": transaction.amount,
+            "type": "withdraw",
+            "timestamp": datetime.utcnow(),
+            "idempotency_key": transaction.idempotency_key,
+            "status": fraud_result["status"]
+        }
+        await db.transactions.insert_one(txn_log)
+        raise HTTPException(status_code=400, detail=fraud_result["reason"])
+    if fraud_result.get("pending"):
+        # Log the blocked withdrawal
+        txn_log = {
+            "user_id": user_id,
+            "account_number": "unknown",
+            "amount": transaction.amount,
+            "type": "withdraw",
+            "timestamp": datetime.utcnow(),
+            "idempotency_key": transaction.idempotency_key,
+            "status": fraud_result["status"]
+        }
+        await db.transactions.insert_one(txn_log)
+        return {"message": "Withdrawal pending admin approval"}
     # Step 2: Lock the account before withdrawing (Pessimistic Locking)
     lock_result = await db.accounts.update_one(
         {"user_id": user_id, "locked": False, "balance": {"$gte": transaction.amount}},  # Ensure balance is sufficient
@@ -81,7 +168,7 @@ async def withdraw(transaction: TransactionRequest, current_user: dict = Depends
             "account_number": "unknown",
             "amount": transaction.amount,
             "type": "withdraw",
-            "timestamp": datetime.datetime.utcnow(),
+            "timestamp":datetime.utcnow(),
             "idempotency_key": transaction.idempotency_key,
             "status": "failed"
         }
@@ -107,7 +194,7 @@ async def withdraw(transaction: TransactionRequest, current_user: dict = Depends
             "account_number": account.get("account_number", "unknown"),
             "amount": transaction.amount,
             "type": "withdraw",
-            "timestamp": datetime.datetime.utcnow(),
+            "timestamp": datetime.utcnow(),
             "idempotency_key": transaction.idempotency_key,
             "status": "success"  # Mark as successful
         }
@@ -152,7 +239,38 @@ async def transfer_funds(
     existing_txn = await db.transactions.find_one({"idempotency_key": transfer.idempotency_key})
     if existing_txn:
         return {"message": "Duplicate transaction ignored", "transaction_id": str(existing_txn["_id"])}
+    
 
+    # Fraud check for transfer (including recipient-specific rules)
+    fraud_result = await check_fraud(sender_id, "transfer", transfer.amount, recipient_account=transfer.to_account)
+    if fraud_result.get("block"):
+        txn_log = {
+            "user_id": sender_id,
+            "account_number": "unknown",
+            "amount": transfer.amount,
+            "type": "transfer",
+            "timestamp": datetime.utcnow(),
+            "idempotency_key": transfer.idempotency_key,
+            "status": fraud_result["status"],
+            "to_account": transfer.to_account
+        }
+        await db.transactions.insert_one(txn_log)
+        raise HTTPException(status_code=400, detail=fraud_result["reason"])
+    if fraud_result.get("pending"):
+        # Log pending transfer and return.
+        txn_log = {
+            "user_id": sender_id,
+            "account_number": "unknown",
+            "amount": transfer.amount,
+            "type": "transfer",
+            "timestamp": datetime.utcnow(),
+            "idempotency_key": transfer.idempotency_key,
+            "status": fraud_result["status"],
+            "to_account": transfer.to_account
+        }
+        await db.transactions.insert_one(txn_log)
+        return {"message": "Transfer pending admin approval"}
+    
     # Step 2: Retrieve the sender's account.
     sender_account = await db.accounts.find_one({"user_id": sender_id})
     if not sender_account:
@@ -201,7 +319,7 @@ async def transfer_funds(
             "account_number": sender_account.get("account_number", "unknown"),
             "amount": transfer.amount,
             "type": "transfer",
-            "timestamp": datetime.datetime.utcnow(),
+            "timestamp": datetime.utcnow(),
             "idempotency_key": transfer.idempotency_key,
             "status": "failed"
     }
@@ -214,9 +332,10 @@ async def transfer_funds(
             "account_number": sender_account.get("account_number", "unknown"),
             "amount": transfer.amount,
             "type": "transfer",
-            "timestamp": datetime.datetime.utcnow(),
+            "timestamp": datetime.utcnow(),
             "idempotency_key": transfer.idempotency_key,
-            "to_account": transfer.to_account  # Additional field for transfers
+            "to_account": transfer.to_account,
+            "status":"success"  # Additional field for transfers
         }
         await db.transactions.insert_one(txn_log)
     finally:
@@ -268,3 +387,75 @@ async def filter_transactions(
     transactions: List[Dict] = await db.transactions.find(query).to_list(length=None)
     transactions = [convert_objectids(txn) for txn in transactions]
     return {"transactions": transactions}
+
+
+
+#  For ADMIN to get all pending transaactions
+@router.get("/pending", dependencies=[Depends(require_roles(["admin"]))])
+async def list_pending_transactions():
+    pending_txns = await db.transactions.find({"status": "pending"}).to_list(length=None)
+    pending_txns = [convert_objectids(txn) for txn in pending_txns]
+    return {"pending_transactions": pending_txns}
+
+
+@router.post("/pending/{txn_id}")
+async def process_pending_transaction(
+    txn_id: str,
+    action: str = Query(..., description="Action to perform: approve or reject"),
+    current_user: dict = Depends(require_roles(["admin"]))
+):
+    # Find the pending transaction by its ObjectId
+    pending_txn = await db.transactions.find_one({"_id": ObjectId(txn_id), "status": "pending"})
+    if not pending_txn:
+        raise HTTPException(status_code=404, detail="Pending transaction not found")
+
+    if action not in ["approve", "reject"]:
+        raise HTTPException(status_code=400, detail="Action must be either 'approve' or 'reject'.")
+
+    if action == "reject":
+        await db.transactions.update_one({"_id": ObjectId(txn_id)}, {"$set": {"status": "failed"}})
+        return {"message": "Transaction rejected"}
+
+    # If approving, then perform the funds movement based on transaction type
+    txn_type = pending_txn["type"]
+    if txn_type == "withdraw":
+        user_id = pending_txn["user_id"]
+        # Check if sufficient funds now exist
+        account = await db.accounts.find_one({"user_id": user_id})
+        if not account or account["balance"] < pending_txn["amount"]:
+            await db.transactions.update_one({"_id": ObjectId(txn_id)}, {"$set": {"status": "failed"}})
+            raise HTTPException(status_code=400, detail="Insufficient funds at approval time")
+        # Deduct the funds
+        debit_result = await db.accounts.update_one({"user_id": user_id}, {"$inc": {"balance": -pending_txn["amount"]}})
+        if debit_result.modified_count == 0:
+            await db.transactions.update_one({"_id": ObjectId(txn_id)}, {"$set": {"status": "failed"}})
+            raise HTTPException(status_code=400, detail="Failed to debit funds on approval")
+        # Mark as approved (success)
+        await db.transactions.update_one({"_id": ObjectId(txn_id)}, {"$set": {"status": "success"}})
+        return {"message": "Withdrawal approved and funds deducted"}
+    
+    elif txn_type == "transfer":
+        sender_id = pending_txn["user_id"]
+        recipient_account_number = pending_txn.get("to_account")
+        # Check sender account
+        sender_account = await db.accounts.find_one({"user_id": sender_id})
+        if not sender_account or sender_account["balance"] < pending_txn["amount"]:
+            await db.transactions.update_one({"_id": ObjectId(txn_id)}, {"$set": {"status": "failed"}})
+            raise HTTPException(status_code=400, detail="Insufficient funds for transfer at approval time")
+        # Debit sender
+        debit_result = await db.accounts.update_one({"user_id": sender_id}, {"$inc": {"balance": -pending_txn["amount"]}})
+        if debit_result.modified_count == 0:
+            await db.transactions.update_one({"_id": ObjectId(txn_id)}, {"$set": {"status": "failed"}})
+            raise HTTPException(status_code=400, detail="Failed to debit sender on approval")
+        # Credit recipient
+        credit_result = await db.accounts.update_one({"account_number": recipient_account_number}, {"$inc": {"balance": pending_txn["amount"]}})
+        if credit_result.modified_count == 0:
+            # Rollback debit
+            await db.accounts.update_one({"user_id": sender_id}, {"$inc": {"balance": pending_txn["amount"]}})
+            await db.transactions.update_one({"_id": ObjectId(txn_id)}, {"$set": {"status": "failed"}})
+            raise HTTPException(status_code=400, detail="Failed to credit recipient on approval")
+        # Mark as approved (success)
+        await db.transactions.update_one({"_id": ObjectId(txn_id)}, {"$set": {"status": "success"}})
+        return {"message": "Transfer approved; funds debited and credited"}
+    else:
+        raise HTTPException(status_code=400, detail="Unsupported transaction type for approval")
