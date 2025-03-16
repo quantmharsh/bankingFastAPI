@@ -6,6 +6,8 @@ from app.utils import require_roles
 from bson import ObjectId
 from typing import  Dict
 from datetime import datetime, timedelta
+from app.cache import redis_client  
+import json
 
 router = APIRouter()
 
@@ -14,15 +16,24 @@ FAILED_ATTEMPTS_THRESHOLD = 5  # Maximum allowed failed attempts
 LOCK_TIME_MINUTES = 10         # Lock account for 10 minutes if threshold exceeded
 FAILED_WINDOW_MINUTES = 10     # Consider failed attempts within a 10-minute window
 
-def convert_objectids(item: Dict) -> Dict:
+def convert_objectids(item):
+    """
+    Recursively convert ObjectId and datetime fields in a dictionary to strings.
+    """
     if isinstance(item, dict):
+        new_item = {}
         for key, value in item.items():
             if isinstance(value, ObjectId):
-                item[key] = str(value)
+                new_item[key] = str(value)
+            elif isinstance(value, datetime):
+                new_item[key] = value.isoformat()
             elif isinstance(value, list):
-                item[key] = [convert_objectids(i) if isinstance(i, dict) else i for i in value]
+                new_item[key] = [convert_objectids(i) if isinstance(i, dict) else (i.isoformat() if isinstance(i, datetime) else i) for i in value]
             elif isinstance(value, dict):
-                item[key] = convert_objectids(value)
+                new_item[key] = convert_objectids(value)
+            else:
+                new_item[key] = value
+        return new_item
     return item
 
 
@@ -95,7 +106,21 @@ async def login(user: UserCreate ,request: Request):
 
 @router.get("/audit-logs", dependencies=[Depends(require_roles(["admin"]))])
 async def get_audit_logs():
+    cache_key = "audit_logs"
+    
+    # Try to get audit logs from Redis cache
+    cached_logs = await redis_client.get(cache_key)
+    if cached_logs:
+        # Deserialize JSON string to Python object
+        logs = json.loads(cached_logs)
+        return {"audit_logs": logs}
+    
+    # If not cached, fetch from MongoDB
     logs = await db.audit_logs.find().to_list(length=None)
-    # Convert ObjectId fields in each log entry
+    # Convert ObjectId fields to strings
     logs = [convert_objectids(log) for log in logs]
+    
+    # Cache the logs as a JSON string with a TTL of 100 seconds
+    await redis_client.set(cache_key, json.dumps(logs), ex=100)
+    
     return {"audit_logs": logs}

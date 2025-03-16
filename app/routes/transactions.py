@@ -11,7 +11,7 @@ from app.models import TransferRequest
 from fastapi import Query ,Path
 from typing import Optional, Dict, List
 from app.tasks import send_email_notification  # Import the Celery task
-
+from app.cache import redis_client  # import the redis client
 router = APIRouter()
 
 
