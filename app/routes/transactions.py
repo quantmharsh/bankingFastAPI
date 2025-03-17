@@ -19,17 +19,7 @@ router = APIRouter()
 # Fraud Detection Helper Function
 # ------------------------------
 async def check_fraud(user_id: str, txn_type: str, amount: float, recipient_account: Optional[str] = None) -> Dict:
-    """
-    Check fraud rules for withdrawals and transfers.
-    
-    Rules:
-      - Daily limit: total withdrawals/transfers (status "success") in a day must not exceed 50,000 Rs.
-      - Hourly frequency: maximum 20 withdrawals/transfers in the past hour.
-      - For transfers: maximum 5 transfers to the same recipient per day.
-      - Single transaction threshold: if amount > 25,000 Rs, block the transaction.
-    Returns a dict with keys:
-      "block": bool, "reason": str, "status": "blocked" if blocked.
-    """
+  
     now = datetime.utcnow()
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     today_end = now.replace(hour=23, minute=59, second=59, microsecond=999999)

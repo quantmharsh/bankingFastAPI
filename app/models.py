@@ -18,7 +18,7 @@ class UserResponse(BaseModel):
     id: str
     name: str
     email: str
-    role: str  # Include role in user response
+    role: str 
 
 # MongoDB Schema for Users
 class UserDB(UserResponse):
@@ -33,7 +33,7 @@ class Account(BaseModel):
     account_number: str
     balance: float = Field(default=0.0, ge=0)
     locked: bool = Field(default=False)  # For pessimistic locking during transactions
-    txn_version: Optional[int] = Field(default=1)  # For optimistic locking if needed
+    txn_version: Optional[int] = Field(default=1)  
 
 # Deposit & Withdraw Request Schema
 class TransactionRequest(BaseModel):
